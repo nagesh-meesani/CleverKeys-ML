@@ -74,3 +74,26 @@ Date: 2025-10-07
   - Updated `PersonalizedSwipeDataset` to accept `normalize_coords` parameter and pass it to `_prepare_points()`.
   - Modified `_prepare_points()` to conditionally apply normalization based on flag.
   - Still applies clamping to [-1.5, 1.5] in both cases for safety.
+
+2026-05-08
+
+- Created branch `feat/futo-te-training` from `main` for the FUTO English + Telugu synthetic training path.
+- Current plan: do not modify `CleverKeys`; use it only as the old 6D reference app. Training/export work belongs in `CleverKeys-ML`, and deployment integration belongs in `voice-typing`.
+- `voice-typing` currently expects a 37-channel RNNT encoder input (`audio_signal` as `[1,37,T]`). Keep that runtime contract for the first working loop.
+- Use the 27 meaningful `PersonalizedSwipeFeaturizer` columns, padded with 10 zero channels, so exported checkpoints remain 37D-compatible without losing gesture information.
+- Training data plan: FUTO English human swipes + Telugu romanized synthetic swipes. Telugu words come from Dakshina via `dakshina/build_lang_dict.py`.
+- Before serious training, fix `new/train_transducer_personalized.py` so `--normalize` is actually passed into `build_dataloaders(...)`, and add a hard 37D compatibility mode for `voice-typing` exports.
+
+2026-05-08 (implementation)
+
+- Updated `new/train_transducer_personalized.py` for the voice-typing contract:
+  - Default coordinate space is now Android/FUTO `[0,1]`; pass `--normalize` only for legacy centered `[-1,1]` experiments.
+  - Default QWERTY key centers match the selected coordinate space.
+  - Full 27 real feature columns are padded to `target_feature_dim=37` by default.
+  - `--normalize` is now passed into `build_dataloaders(...)`, fixing the previously dead CLI flag.
+- Added `scripts/generate_synthetic_swipes.py` to create Telugu/Indic romanized swipe JSONL from Dakshina dictionaries, defaulting to `[0,1]` coordinates.
+- Cleaned `scripts/filter_and_normalize_dataset.py` so FUTO filtering clearly preserves `[0,1]`, has small CLI controls, and falls back when NLTK/wordfreq are unavailable.
+- Local verification performed with system Python 3.12:
+  - `py_compile` passed for the patched trainer, synthetic generator, and FUTO filter.
+  - Synthetic generator smoke test wrote valid train/val JSONL with coordinates inside `[0,1]`.
+  - FUTO filter smoke test wrote filtered JSONL and relative timestamps. Full trainer import/dry-run could not run locally because the system environment lacks `lightning`/NeMo dependencies.

@@ -1,28 +1,34 @@
 #!/usr/bin/env python3
-"""
-filter_and_normalize_swipes.py
----------------------------------
-Hybrid FUTO + normalization filter for RNNT training.
+"""Filter FUTO swipe JSONL into the RNNT training manifest format.
 
-Combines:
-✅ FUTO metadata filtering (orientation, canvas sanity, valid dictionary)
-✅ My coordinate normalization ([-1,1], overshoot clamp, motion filters)
-✅ Robust word validation (NLTK + wordfreq top-N hybrid)
-✅ Detailed logging and stats reporting
+The Hugging Face FUTO files (train/dev/test.jsonl) already store normalized
+keyboard coordinates in [0,1]. This script keeps that coordinate space, makes
+timestamps relative, filters questionable traces, and writes records shaped as:
 
-Usage (one-liner):
-uv run python filter_and_normalize_swipes.py futo/train.jsonl filtered/futo_filtered_norm.jsonl
+    {"word": "hello", "points": [{"x": 0.1, "y": 0.2, "t": 0.0}, ...]}
+
+For the current voice-typing training path, run the trainer without
+``--normalize`` so these [0,1] coordinates stay aligned with Android.
 """
 
+import argparse
 import json
 import re
-import sys
-import nltk
-import numpy as np
-from pathlib import Path
-from tqdm import tqdm
-from wordfreq import top_n_list, word_frequency
 from collections import Counter
+from pathlib import Path
+
+import numpy as np
+from tqdm import tqdm
+
+try:
+    import nltk
+except ImportError:
+    nltk = None
+
+try:
+    from wordfreq import top_n_list
+except ImportError:
+    top_n_list = None
 
 # ----------------- CONFIG -----------------
 MIN_WORD_LEN, MAX_WORD_LEN = 2, 20
@@ -39,22 +45,28 @@ MAX_SPEED = 0.01
 # ----------------- WORD VALIDATION -----------------
 def build_valid_word_set(max_words=400000):
     """Build hybrid set using NLTK + top wordfreq words."""
-    try:
-        from nltk.corpus import words
+    valid_words = set()
+    if nltk is not None:
+        try:
+            from nltk.corpus import words
 
-        valid_words = set(canonicalize_word(w) for w in words.words())
-    except LookupError:
-        print("Downloading NLTK words corpus...")
-        nltk.download("words", quiet=True)
-        from nltk.corpus import words
+            valid_words = set(canonicalize_word(w) for w in words.words())
+        except LookupError:
+            print("Downloading NLTK words corpus...")
+            nltk.download("words", quiet=True)
+            from nltk.corpus import words
 
-        valid_words = set(canonicalize_word(w) for w in words.words())
+            valid_words = set(canonicalize_word(w) for w in words.words())
 
     wf_set = set()
-    for w in top_n_list("en", max_words):
-        base = canonicalize_word(w)
-        if re.fullmatch(r"[a-z]{2,20}", base):
-            wf_set.add(base)
+    if top_n_list is not None:
+        for w in top_n_list("en", max_words):
+            base = canonicalize_word(w)
+            if re.fullmatch(r"[a-z]{2,20}", base):
+                wf_set.add(base)
+    if not valid_words and not wf_set:
+        print("NLTK/wordfreq unavailable; using regex and frequency filtering only.")
+        return None
     print(f"Loaded {len(valid_words):,} NLTK words and {len(wf_set):,} wordfreq words.")
     return valid_words | wf_set
 
@@ -89,6 +101,8 @@ def is_valid_word(word: str, valid_set) -> bool:
         stats["invalid_length"] += 1
         return False
     clean = canonicalize_word(word)
+    if valid_set is None:
+        return bool(re.fullmatch(r"[a-z]{2,20}", clean))
     return clean in valid_set
 
 
@@ -109,7 +123,7 @@ def build_frequency_map(input_path: Path) -> Counter:
     return freq
 
 
-# ----------------- GESTURE NORMALIZATION -----------------
+# ----------------- GESTURE CLEANUP -----------------
 def normalize_points(points):
     if len(points) < MIN_POINTS:
         stats["trace_too_short"] += 1
@@ -150,10 +164,6 @@ def normalize_points(points):
         stats["too_fast_speed"] += 1
         return None
 
-    # x = np.clip(x, -MAX_OVERSHOOT, 1 + MAX_OVERSHOOT)
-    # y = np.clip(y, -MAX_OVERSHOOT, 1 + MAX_OVERSHOOT)
-    # x = (x * 2) - 1
-    # y = (y * 2) - 1
     x = np.clip(x, -OUT_CLAMP, OUT_CLAMP)
     y = np.clip(y, -OUT_CLAMP, OUT_CLAMP)
 
@@ -183,9 +193,14 @@ stats = {
 
 
 # ----------------- MAIN FILTER -----------------
-def filter_and_normalize(input_path: Path, output_path: Path, valid_set, freq_map):
+def filter_and_normalize(
+    input_path: Path, output_path: Path, valid_set, freq_map, max_lines: int = 0
+):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with input_path.open("r") as fin, output_path.open("w") as fout:
-        for line in tqdm(fin, desc=f"Filtering {input_path.name}"):
+        for line_index, line in enumerate(tqdm(fin, desc=f"Filtering {input_path.name}")):
+            if max_lines and line_index >= max_lines:
+                break
             stats["total"] += 1
             try:
                 sample = json.loads(line)
@@ -247,16 +262,33 @@ def filter_and_normalize(input_path: Path, output_path: Path, valid_set, freq_ma
 
 
 # ----------------- ENTRY -----------------
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Filter FUTO swipe JSONL into CleverKeys-ML training JSONL."
+    )
+    parser.add_argument("input_jsonl", help="Path to FUTO train/dev/test JSONL")
+    parser.add_argument("output_jsonl", help="Filtered manifest output path")
+    parser.add_argument("--min-word-freq", type=int, default=MIN_WORD_FREQ)
+    parser.add_argument("--max-canvas-width", type=int, default=MAX_CANVAS_WIDTH)
+    parser.add_argument("--max-lines", type=int, default=0, help="Limit rows for smoke tests")
+    parser.add_argument("--max-word-list", type=int, default=400000)
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print(
-            "Usage: python filter_and_normalize_swipes.py <input.jsonl> <output.jsonl>"
-        )
-        sys.exit(1)
-    valid_set = build_valid_word_set()
-    input_path = Path(sys.argv[1])
-    freq_map = build_frequency_map(input_path)  # NEW PREPASS
-    filter_and_normalize(input_path, Path(sys.argv[2]), valid_set, freq_map)
+    args = parse_args()
+    MIN_WORD_FREQ = args.min_word_freq
+    MAX_CANVAS_WIDTH = args.max_canvas_width
+    valid_set = build_valid_word_set(args.max_word_list)
+    input_path = Path(args.input_jsonl)
+    freq_map = build_frequency_map(input_path)
+    filter_and_normalize(
+        input_path,
+        Path(args.output_jsonl),
+        valid_set,
+        freq_map,
+        max_lines=args.max_lines,
+    )
 
 
 # leonweber:

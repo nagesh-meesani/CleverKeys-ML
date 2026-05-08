@@ -217,6 +217,7 @@ CONFIG: Dict[str, Any] = {
             **MODEL_PRESETS[SELECTED_MODEL]["encoder"],
             "subsampling_factor": 2,  # Reduces the sequence length early in the model, saving computation.
         },
+        "target_feature_dim": 37,
         "decoder": MODEL_PRESETS[SELECTED_MODEL]["decoder"],
         "joint": {
             **MODEL_PRESETS[SELECTED_MODEL]["joint"],
@@ -386,8 +387,10 @@ def resample_points(
     return resampled
 
 
-@lru_cache(maxsize=1)
-def load_key_centers(path: Optional[str]) -> List[Tuple[str, float, float]]:
+@lru_cache(maxsize=4)
+def load_key_centers(
+    path: Optional[str], coordinate_space: str = "zero_one"
+) -> List[Tuple[str, float, float]]:
     """Loads key centers from a JSON file or returns a default QWERTY layout."""
     if path:
         try:
@@ -404,7 +407,10 @@ def load_key_centers(path: Optional[str]) -> List[Tuple[str, float, float]]:
         for col_idx, char in enumerate(row):
             x01 = (col_idx + 0.5) / 10.0
             y01 = (row_idx + 0.5) / 3.0
-            centers.append((char, x01 * 2.0 - 1.0, y01 * 2.0 - 1.0))
+            if coordinate_space == "centered":
+                centers.append((char, x01 * 2.0 - 1.0, y01 * 2.0 - 1.0))
+            else:
+                centers.append((char, x01, y01))
     return centers
 
 
@@ -478,9 +484,14 @@ class PersonalizedSwipeFeaturizer:
     ]
 
     def __init__(
-        self, key_centers_path: Optional[str] = None, mobile_features: bool = False
+        self,
+        key_centers_path: Optional[str] = None,
+        mobile_features: bool = False,
+        target_feature_dim: Optional[int] = 37,
+        coordinate_space: str = "zero_one",
     ):
-        self.key_centers = load_key_centers(key_centers_path)
+        self.key_centers = load_key_centers(key_centers_path, coordinate_space)
+        self.target_feature_dim = target_feature_dim
         # Select feature names based on target footprint
         self.FEATURE_NAMES = (
             self.MOBILE_FEATURE_NAMES if mobile_features else self.FULL_FEATURE_NAMES
@@ -488,7 +499,7 @@ class PersonalizedSwipeFeaturizer:
 
     @property
     def feature_dim(self) -> int:
-        return len(self.FEATURE_NAMES)
+        return self.target_feature_dim or len(self.FEATURE_NAMES)
 
     def __call__(self, points: Iterable[Dict[str, float]]) -> np.ndarray:
         pts = list(points)
@@ -628,7 +639,18 @@ class PersonalizedSwipeFeaturizer:
             if arr is None:
                 arr = np.zeros_like(x)
             out_cols.append(arr.astype(np.float32, copy=False))
-        return np.stack(out_cols, axis=1)
+        features = np.stack(out_cols, axis=1)
+        if self.target_feature_dim is not None:
+            current_dim = features.shape[1]
+            if current_dim < self.target_feature_dim:
+                pad = np.zeros(
+                    (features.shape[0], self.target_feature_dim - current_dim),
+                    dtype=np.float32,
+                )
+                features = np.concatenate([features, pad], axis=1)
+            elif current_dim > self.target_feature_dim:
+                features = features[:, : self.target_feature_dim]
+        return features
 
 
 # ---------------------------------------------------------------------------
@@ -661,7 +683,7 @@ class PersonalizedSwipeDataset(Dataset):
         featurizer: PersonalizedSwipeFeaturizer,
         augmenter: Optional["SwipeAugmentation"] = None,
         is_training: bool = False,
-        normalize_coords: bool = True,
+        normalize_coords: bool = False,
     ) -> None:
         super().__init__()
         self.manifest_path = manifest_path
@@ -775,9 +797,14 @@ class PersonalizedSwipeDataset(Dataset):
 
     @staticmethod
     def _prepare_points(
-        points: List[Dict[str, Any]], normalize_coords: bool = True
+        points: List[Dict[str, Any]], normalize_coords: bool = False
     ) -> List[Dict[str, float]]:
-        """Prepares raw points by optionally transforming from [0, 1] to [-1, 1] and making time relative."""
+        """Prepares raw points and makes time relative.
+
+        The default training path keeps coordinates in [0,1] to match the
+        current voice-typing Android runtime. Passing --normalize transforms
+        [0,1] input into centered [-1,1] legacy coordinates.
+        """
         if not points:
             return []
         # Guard against rare non-monotonic timestamps by sorting by 't' when present
@@ -810,8 +837,8 @@ class PersonalizedSwipeDataset(Dataset):
                 centered_x = clamp(centered_x, -1.5, 1.5)
                 centered_y = clamp(centered_y, -1.5, 1.5)
             else:
-                # Assume data is already in [-1, 1] coordinate system
-                # Still apply clamping for safety
+                # Keep Android/FUTO-style [0,1] coordinates as-is. We clamp a
+                # little wider to preserve minor off-key overshoot.
                 centered_x = clamp(raw_x, -1.5, 1.5)
                 centered_y = clamp(raw_y, -1.5, 1.5)
 
@@ -1141,12 +1168,16 @@ def build_dataloaders(
     vocab: Dict[str, int],
     subset_train: int = 0,
     subset_val: int = 0,
-    normalize_coords: bool = True,
+    normalize_coords: bool = False,
 ):
     """Builds and configures the training and validation DataLoaders."""
+    coordinate_space = "centered" if normalize_coords else "zero_one"
+    target_feature_dim = int(cfg.model.get("target_feature_dim", 37) or 0) or None
     featurizer = PersonalizedSwipeFeaturizer(
         cfg.data.get("key_centers_path"),
         mobile_features=bool(cfg.model.get("mobile_features", False)),
+        target_feature_dim=target_feature_dim,
+        coordinate_space=coordinate_space,
     )
 
     augmenter = None
@@ -1709,7 +1740,7 @@ def main() -> None:
     parser.add_argument(
         "--normalize",
         action="store_true",
-        help="Normalize coordinates from [0,1] to [-1,1]. Pass false if data is already in [-1,1]",
+        help="Transform [0,1] coordinates to centered [-1,1] legacy training space. Omit for voice-typing/FUTO [0,1] compatibility.",
     )
     args = parser.parse_args()
 
@@ -1739,7 +1770,7 @@ def main() -> None:
         cfg.model.decoder = MODEL_PRESETS[args.model_size]["decoder"]
         cfg.model.joint.update(MODEL_PRESETS[args.model_size]["joint"])
         print(f"Using {args.model_size} model preset")
-    cfg.model["mobile_features"] = bool(args.model_size == "mobile")
+    cfg.model["mobile_features"] = False
 
     # --- Resolve Paths and Set up Environment ---
     cfg.data.train_manifest = _resolve_path(cfg.data.train_manifest)
@@ -1822,7 +1853,11 @@ def main() -> None:
     # --- Build Model and DataLoaders ---
     vocab = load_vocab(cfg.data.vocab_path)
     train_loader, val_loader, feature_dim = build_dataloaders(
-        cfg, vocab, subset_train=subset_train, subset_val=subset_val
+        cfg,
+        vocab,
+        subset_train=subset_train,
+        subset_val=subset_val,
+        normalize_coords=args.normalize,
     )
     nemo_cfg = build_model_config(cfg, list(vocab.keys()), feature_dim)
     # Avoid Numba JIT/caching issues in librosa on restricted environments
@@ -1943,7 +1978,7 @@ def main() -> None:
                     target_lengths=target_length,
                 )
             print(
-                f"[DRY] Batch shapes: signal={tuple(signal.shape)} tokens={tuple(transcript.shape)}; RNNT loss={float(loss_value)}"
+                f"[DRY] Batch shapes: signal={tuple(signal.shape)} tokens={tuple(transcript.shape)} feature_dim={signal.shape[-1]}; RNNT loss={float(loss_value)}"
             )
         except Exception as e:
             print(f"Dry-run failed: {e}")
