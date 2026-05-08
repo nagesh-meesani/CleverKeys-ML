@@ -24,6 +24,10 @@ import datetime as dt
 import json
 from torch.nn.utils.rnn import pad_sequence
 import os
+
+os.environ.setdefault("NUMBA_DISABLE_JIT", "0")
+os.environ.setdefault("NUMBA_DISABLE_PERFORMANCE_WARNINGS", "1")
+
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import logging
@@ -1766,6 +1770,12 @@ def main() -> None:
         help="Override maximum training epochs",
     )
     parser.add_argument(
+        "--precision",
+        choices=["32-true", "16-mixed", "bf16-mixed", "64-true"],
+        default=None,
+        help="Override Lightning precision. Use 32-true for safest Colab T4 smoke tests.",
+    )
+    parser.add_argument(
         "--normalize",
         action="store_true",
         help="Transform [0,1] coordinates to centered [-1,1] legacy training space. Omit for voice-typing/FUTO [0,1] compatibility.",
@@ -1835,6 +1845,8 @@ def main() -> None:
     if args.max_epochs is not None and args.max_epochs > 0:
         cfg.training.max_epochs = int(args.max_epochs)
         print(f"Overriding max_epochs to {args.max_epochs}")
+    if args.precision:
+        cfg.training.precision = args.precision
     if args.val_limit_batches is not None:
         try:
             cfg.validation.limit_batches = float(args.val_limit_batches)
@@ -1893,8 +1905,12 @@ def main() -> None:
         normalize_coords=args.normalize,
     )
     nemo_cfg = build_model_config(cfg, list(vocab.keys()), feature_dim)
-    # Avoid Numba JIT/caching issues in librosa on restricted environments
-    os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
+    # Keep Numba JIT enabled: warprnnt_numba uses it for GPU RNNT loss/backward.
+    if os.environ.get("NUMBA_DISABLE_JIT") == "1":
+        print(
+            "Warning: NUMBA_DISABLE_JIT=1 can stall warprnnt_numba training; overriding to 0."
+        )
+        os.environ["NUMBA_DISABLE_JIT"] = "0"
     cache_dir = Path(
         os.environ.get("NUMBA_CACHE_DIR", str(Path("./.numba_cache").resolve()))
     )
@@ -1923,6 +1939,11 @@ def main() -> None:
         cfg.training.precision = "32-true"
         print(
             "Enabling manual BF16 autocast for forward passes; Trainer precision set to 32-true"
+        )
+    elif str(cfg.training.precision).startswith("bf16") and not _supports_bf16():
+        cfg.training.precision = "32-true"
+        print(
+            "BF16 is not supported by this CUDA device; using Trainer precision=32-true"
         )
 
     model = PersonalizedRNNTModel(
