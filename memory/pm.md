@@ -116,3 +116,9 @@ Date: 2025-10-07
 - Validation now honors `--num-workers 0` instead of forcing four validation workers, avoiding Colab sanity-check DataLoader stalls.
 - Kept Numba JIT enabled for `warprnnt_numba` and added `--precision`; non-BF16 CUDA devices such as T4 now auto-fall back to `32-true` for safer Colab smoke training.
 - Added `--debug-gpu-train-step` to run one manual CUDA forward/loss/backward/optimizer step with stage markers when Lightning hangs before completing the first batch.
+
+2026-05-09 (RunPod startup diagnosis)
+
+- RunPod full FUTO+Telugu manifests can spend 10-15 minutes in CPU-side startup before CUDA appears in `nvidia-smi`, because `PersonalizedSwipeDataset` eagerly loads the full 4GB train JSONL and then computes sampling weights over all samples before Trainer starts.
+- Fixed `_has_usable_cuda()` to use CUDA availability instead of `torch.cuda.is_initialized()`, so DataLoaders can enable `pin_memory` before the first CUDA context is created.
+- Added manifest-load and sampling-weight progress logs to `new/train_transducer_personalized.py` so future full runs show progress during the pre-GPU phase.

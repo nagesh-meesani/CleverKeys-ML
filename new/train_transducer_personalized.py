@@ -295,14 +295,9 @@ CONFIG: Dict[str, Any] = {
 
 
 def _has_usable_cuda() -> bool:
-    """More conservative CUDA check to avoid lazy-init side effects.
-
-    Uses device_count() and is_initialized() to decide if CUDA is already
-    initialized and has visible devices, which helps skip first-touch lazy
-    initialization quirks in some environments.
-    """
+    """Return whether CUDA is available for data-transfer optimizations."""
     try:
-        return bool(torch.cuda.device_count() > 0 and torch.cuda.is_initialized())
+        return bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
     except Exception as exc:  # pragma: no cover - defensive guard
         print(f"CUDA probe failed ({exc}); falling back to CPU")
         return False
@@ -700,19 +695,39 @@ class PersonalizedSwipeDataset(Dataset):
         self.is_training = is_training
         self.normalize_coords = normalize_coords
         self.samples: List[Dict[str, Any]] = []
+        log = logging.getLogger("train_rnnt")
+        started = dt.datetime.now()
+        total_rows = 0
 
         try:
             with open(manifest_path, "r", encoding="utf-8") as fh:
-                for line in fh:
+                for total_rows, line in enumerate(fh, start=1):
                     payload = json.loads(line)
                     if not payload.get("word") or not payload.get("points"):
                         continue
                     self.samples.append(payload)
+                    if total_rows % 100000 == 0:
+                        elapsed = (dt.datetime.now() - started).total_seconds()
+                        log.info(
+                            "Loaded %d rows (%d usable samples) from %s in %.1fs",
+                            total_rows,
+                            len(self.samples),
+                            manifest_path,
+                            elapsed,
+                        )
         except FileNotFoundError:
             print(f"FATAL: Manifest file not found at {manifest_path}")
             raise
 
         self.word_counts = Counter(sample["word"] for sample in self.samples)
+        elapsed = (dt.datetime.now() - started).total_seconds()
+        log.info(
+            "Loaded %d usable samples from %s (%d rows) in %.1fs",
+            len(self.samples),
+            manifest_path,
+            total_rows,
+            elapsed,
+        )
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -749,6 +764,14 @@ class PersonalizedSwipeDataset(Dataset):
         if strategy == "none" or not self.samples:
             return None
 
+        log = logging.getLogger("train_rnnt")
+        started = dt.datetime.now()
+        log.info(
+            "Computing '%s' sampling weights for %d samples",
+            strategy,
+            len(self.samples),
+        )
+
         # Unpack all sampling parameters from config for clarity
         freq_power = float(sampling_cfg.get("freq_power", 0.5))
         length_power = float(sampling_cfg.get("length_power", 0.0))
@@ -768,7 +791,7 @@ class PersonalizedSwipeDataset(Dataset):
         )
 
         weights: List[float] = []
-        for sample in self.samples:
+        for sample_index, sample in enumerate(self.samples, start=1):
             word = sample["word"]
             freq = self.word_counts.get(word, 1)
             word_len = len(word)
@@ -790,6 +813,14 @@ class PersonalizedSwipeDataset(Dataset):
                 weight *= rare_boost
 
             weights.append(weight)
+            if sample_index % 200000 == 0:
+                elapsed = (dt.datetime.now() - started).total_seconds()
+                log.info(
+                    "Computed sampling weights for %d/%d samples in %.1fs",
+                    sample_index,
+                    len(self.samples),
+                    elapsed,
+                )
 
         if not weights or sum(weights) == 0:
             return None
@@ -798,6 +829,12 @@ class PersonalizedSwipeDataset(Dataset):
         weights_arr /= weights_arr.mean()  # Normalize weights
         if max_weight > 0:
             weights_arr = np.clip(weights_arr, 1.0 / max_weight, max_weight)
+        elapsed = (dt.datetime.now() - started).total_seconds()
+        log.info(
+            "Computed sampling weights for %d samples in %.1fs",
+            len(self.samples),
+            elapsed,
+        )
         return weights_arr
 
     @staticmethod
@@ -1243,6 +1280,13 @@ def build_dataloaders(
             f"Enabled '{cfg.sampling.strategy}' sampling (weight range {train_weights.min():.3f}–{train_weights.max():.3f})"
         )
 
+    pin_memory = _has_usable_cuda()
+    logging.getLogger("train_rnnt").info(
+        "DataLoader pin_memory=%s (cuda_available=%s)",
+        pin_memory,
+        torch.cuda.is_available(),
+    )
+
     train_loader = DataLoader(
         dataset=train_ds,
         batch_size=cfg.training.batch_size,
@@ -1250,7 +1294,7 @@ def build_dataloaders(
         shuffle=train_sampler is None,
         num_workers=cfg.training.num_workers,
         collate_fn=collate_fn,
-        pin_memory=_has_usable_cuda(),
+        pin_memory=pin_memory,
         drop_last=True,
         persistent_workers=cfg.training.persistent_workers,
         prefetch_factor=(2 if cfg.training.num_workers > 0 else None),
@@ -1279,7 +1323,7 @@ def build_dataloaders(
         shuffle=val_sampler is None,
         num_workers=val_workers,
         collate_fn=collate_fn,
-        pin_memory=_has_usable_cuda(),
+        pin_memory=pin_memory,
         drop_last=False,  # drop_last=False is important for validation
         persistent_workers=cfg.training.persistent_workers,
         prefetch_factor=2 if val_workers > 0 else None,
