@@ -115,3 +115,4 @@ Date: 2025-10-07
 - Fixed `--subset-train` and `--subset-val` so they actually wrap datasets before sampling weights are computed.
 - Validation now honors `--num-workers 0` instead of forcing four validation workers, avoiding Colab sanity-check DataLoader stalls.
 - Kept Numba JIT enabled for `warprnnt_numba` and added `--precision`; non-BF16 CUDA devices such as T4 now auto-fall back to `32-true` for safer Colab smoke training.
+- Added `--debug-gpu-train-step` to run one manual CUDA forward/loss/backward/optimizer step with stage markers when Lightning hangs before completing the first batch.

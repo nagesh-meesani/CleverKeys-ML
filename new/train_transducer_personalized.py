@@ -1723,6 +1723,11 @@ def main() -> None:
         help="Build one train batch and run forward+loss, then exit",
     )
     parser.add_argument(
+        "--debug-gpu-train-step",
+        action="store_true",
+        help="Run one manual GPU train step with stage-by-stage timing, then exit",
+    )
+    parser.add_argument(
         "--val-limit-batches",
         type=float,
         default=None,
@@ -2036,6 +2041,77 @@ def main() -> None:
             )
         except Exception as e:
             print(f"Dry-run failed: {e}")
+        return
+
+    if args.debug_gpu_train_step:
+        print("Performing one manual GPU train step...", flush=True)
+        if not torch.cuda.is_available():
+            print("CUDA is not available in this environment.", flush=True)
+            return
+
+        device = torch.device("cuda:0")
+        model = model.to(device)
+        model.train()
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=float(cfg.training.learning_rate), weight_decay=1e-3
+        )
+
+        def run_stage(name, fn):
+            print(f"[GPU-STEP] start {name}", flush=True)
+            started = dt.datetime.now()
+            result = fn()
+            torch.cuda.synchronize()
+            elapsed = (dt.datetime.now() - started).total_seconds()
+            print(f"[GPU-STEP] done {name} in {elapsed:.3f}s", flush=True)
+            return result
+
+        try:
+            batch = run_stage("load_batch", lambda: next(iter(train_loader)))
+            batch = tuple(
+                item.to(device, non_blocking=True) if torch.is_tensor(item) else item
+                for item in batch
+            )
+            torch.cuda.synchronize()
+            signal, signal_len, transcript, transcript_len = batch
+            print(
+                f"[GPU-STEP] batch signal={tuple(signal.shape)} tokens={tuple(transcript.shape)} feature_dim={signal.shape[-1]}",
+                flush=True,
+            )
+
+            optimizer.zero_grad(set_to_none=True)
+            encoded, encoded_len = run_stage(
+                "encoder_forward",
+                lambda: model.forward(
+                    input_signal=signal, input_signal_length=signal_len
+                ),
+            )
+            decoder, target_length, _ = run_stage(
+                "decoder_forward",
+                lambda: model.decoder(
+                    targets=transcript, target_length=transcript_len
+                ),
+            )
+            joint = run_stage(
+                "joint_forward",
+                lambda: model.joint(encoder_outputs=encoded, decoder_outputs=decoder),
+            )
+            loss_value = run_stage(
+                "rnnt_loss",
+                lambda: model.loss(
+                    log_probs=joint,
+                    targets=transcript,
+                    input_lengths=encoded_len,
+                    target_lengths=target_length,
+                ),
+            )
+            loss_value = model.add_auxiliary_losses(loss_value)
+            print(f"[GPU-STEP] loss={float(loss_value.detach().cpu())}", flush=True)
+            run_stage("backward", lambda: loss_value.backward())
+            run_stage("optimizer_step", optimizer.step)
+            optimizer.zero_grad(set_to_none=True)
+            print("[GPU-STEP] manual train step completed", flush=True)
+        except Exception as exc:
+            print(f"[GPU-STEP] failed: {type(exc).__name__}: {exc}", flush=True)
         return
 
     # --- Trainer ---
