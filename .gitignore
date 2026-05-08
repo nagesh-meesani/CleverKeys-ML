@@ -1,7 +1,9 @@
 checkpoints*/
 *.nemo
 logs*/
-data/
+data/*
+!data/dakshina/
+!data/dakshina/te_dict.json
 _pycache_/
 __pycache__/
 *.ckpt

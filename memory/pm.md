@@ -103,7 +103,7 @@ Date: 2025-10-07
 - Added `scripts/prepare_runpod_training_data.py` as the one-command pod prep wrapper:
   - optionally downloads FUTO JSONL files with `huggingface_hub`;
   - filters FUTO train/dev/test while preserving `[0,1]`;
-  - builds or uses a Dakshina `{lang}_dict.json`;
+  - uses the committed `data/dakshina/te_dict.json` by default, or optionally builds a Dakshina `{lang}_dict.json` from a separate sibling dataset folder;
   - generates Telugu synthetic train/val JSONL in `[0,1]`;
   - writes merged `train_manifest.jsonl`, `val_manifest.jsonl`, `manifest_summary.json`, and `runpod_training_commands.txt`.
 - Added `docs/runpod_futo_telugu.md` with the coordinate clarification, failed frozen-encoder explanation, pod setup, data prep, smoke check, full first training command, and deployment guardrails.

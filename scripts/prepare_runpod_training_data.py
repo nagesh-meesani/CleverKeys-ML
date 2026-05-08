@@ -287,7 +287,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--download-futo", action="store_true")
     parser.add_argument("--futo-repo", default="futo-org/swipe.futo.org")
     parser.add_argument("--skip-futo", action="store_true")
-    parser.add_argument("--dict-path", default="../dakshina/te_dict.json")
+    parser.add_argument("--dict-path", default="data/dakshina/te_dict.json")
     parser.add_argument("--dakshina-dir", default="../dakshina")
     parser.add_argument("--lang", default="te")
     parser.add_argument("--vocab-cap", type=int, default=40000)

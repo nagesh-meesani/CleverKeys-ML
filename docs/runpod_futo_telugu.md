@@ -7,6 +7,14 @@ This is the ready-to-run path for training a `voice-typing` compatible swipe mod
 - FUTO English human swipe traces.
 - Telugu romanized synthetic swipe traces generated from the Dakshina dictionary.
 
+Only the generated Telugu dictionary is kept in this repo:
+
+```text
+data/dakshina/te_dict.json
+```
+
+Do not copy the full Dakshina dataset into `CleverKeys-ML`. Keep the full Dakshina dataset outside the repo only if you need to rebuild the dictionary.
+
 ## Important Clarification
 
 The confusing terminal text that said synthetic coordinates were in `[-1,1]` came from inspecting an old stashed file with:
@@ -93,8 +101,7 @@ If the pod can download FUTO directly from Hugging Face:
 uv run python scripts/prepare_runpod_training_data.py \
   --download-futo \
   --futo-dir data/futo_raw \
-  --dakshina-dir ../dakshina \
-  --dict-path ../dakshina/te_dict.json \
+  --dict-path data/dakshina/te_dict.json \
   --lang te \
   --vocab-cap 40000
 ```
@@ -112,11 +119,18 @@ Then run:
 ```bash
 uv run python scripts/prepare_runpod_training_data.py \
   --futo-dir data/futo_raw \
-  --dakshina-dir ../dakshina \
-  --dict-path ../dakshina/te_dict.json \
+  --dict-path data/dakshina/te_dict.json \
   --lang te \
   --vocab-cap 40000
 ```
+
+If `data/dakshina/te_dict.json` is missing and you have the full Dakshina folder as a sibling, add:
+
+```bash
+  --dakshina-dir ../dakshina
+```
+
+The prep script will rebuild `te_dict.json` into the output folder. For normal pod runs, the committed `data/dakshina/te_dict.json` is enough.
 
 The output folder is:
 
