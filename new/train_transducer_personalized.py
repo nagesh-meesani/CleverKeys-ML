@@ -200,6 +200,7 @@ CONFIG: Dict[str, Any] = {
         "persistent_workers": False,  # Whether to use persistent workers.
         "learning_rate": 2e-4,  # A conservative learning rate for the AdamW optimizer, good for stable convergence.
         "max_epochs": 500,  # Total number of training epochs (increased for multi-day training).
+        "limit_train_batches": 1.0,  # Fraction/number of train batches per epoch; 1.0 means full epoch.
         "gradient_accumulation": 2,  # Accumulate gradients over multiple batches. Useful for simulating larger batch sizes on smaller GPUs.
         "accelerator": "gpu",  # Use 'gpu' if available, will auto-fallback to 'cpu'.
         "devices": 1,  # Number of GPUs to use.
@@ -1213,9 +1214,20 @@ def build_dataloaders(
         normalize_coords=normalize_coords,
     )
 
-    # Compute sampling weights only if training dataset is base dataset (not Subset)
-    base_train_ds = train_ds.dataset if isinstance(train_ds, Subset) else train_ds
-    train_weights = base_train_ds.compute_sampling_weights(cfg.sampling)
+    if subset_train and subset_train > 0:
+        train_ds = Subset(train_ds, range(min(int(subset_train), len(train_ds))))
+    if subset_val and subset_val > 0:
+        val_ds = Subset(val_ds, range(min(int(subset_val), len(val_ds))))
+
+    def _sampling_weights_for(dataset, sampling_cfg):
+        if isinstance(dataset, Subset):
+            weights = dataset.dataset.compute_sampling_weights(sampling_cfg)
+            if weights is None:
+                return None
+            return np.asarray(weights)[list(dataset.indices)]
+        return dataset.compute_sampling_weights(sampling_cfg)
+
+    train_weights = _sampling_weights_for(train_ds, cfg.sampling)
     train_sampler = None
     if train_weights is not None:
         train_sampler = WeightedRandomSampler(
@@ -1241,8 +1253,7 @@ def build_dataloaders(
     )
 
     val_sampler = None
-    base_val_ds = val_ds.dataset if isinstance(val_ds, Subset) else val_ds
-    val_weights = base_val_ds.compute_sampling_weights(cfg.validation)
+    val_weights = _sampling_weights_for(val_ds, cfg.validation)
     if val_weights is not None:
         num_samples = min(
             len(val_weights), int(cfg.validation.get("max_samples", len(val_weights)))
@@ -1253,9 +1264,7 @@ def build_dataloaders(
             replacement=False,
         )
 
-    # Use more workers for validation to avoid bottleneck
-    # Use same number of workers as training or at least 4
-    val_workers = max(4, cfg.training.num_workers)
+    val_workers = cfg.training.num_workers
     val_batch_size = max(
         1, int(cfg.training.batch_size * cfg.validation.get("batch_size_factor", 0.5))
     )
@@ -1610,6 +1619,19 @@ def main() -> None:
     cfg = DictConfig(CONFIG)
 
     # --- CLI Arguments ---
+    def _parse_batch_limit(value: str):
+        try:
+            if value.isdigit():
+                return int(value)
+            parsed = float(value)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "must be an integer count or a fraction between 0 and 1"
+            ) from exc
+        if parsed < 0:
+            raise argparse.ArgumentTypeError("must be non-negative")
+        return parsed
+
     parser = argparse.ArgumentParser(
         description="Train Personalized RNNT for CleverKeys"
     )
@@ -1701,6 +1723,12 @@ def main() -> None:
         type=float,
         default=None,
         help="Fraction [0,1] of validation set per run (overrides config)",
+    )
+    parser.add_argument(
+        "--limit-train-batches",
+        type=_parse_batch_limit,
+        default=None,
+        help="Fraction [0,1] or integer count of training batches per epoch (overrides config)",
     )
     parser.add_argument(
         "--val-check-interval",
@@ -1810,6 +1838,11 @@ def main() -> None:
     if args.val_limit_batches is not None:
         try:
             cfg.validation.limit_batches = float(args.val_limit_batches)
+        except Exception:
+            pass
+    if args.limit_train_batches is not None:
+        try:
+            cfg.training.limit_train_batches = args.limit_train_batches
         except Exception:
             pass
     if args.check_val_every_n_epoch is not None:
@@ -2011,6 +2044,7 @@ def main() -> None:
         default_root_dir=root_dir,
         check_val_every_n_epoch=cfg.validation.check_val_every_n_epoch,
         # val_check_interval=cfg.validation.check_interval,
+        limit_train_batches=cfg.training.limit_train_batches,
         limit_val_batches=cfg.validation.limit_batches,
         fast_dev_run=bool(int(os.environ.get("FAST_DEV_RUN", "0"))),
     )

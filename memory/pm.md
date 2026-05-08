@@ -108,3 +108,9 @@ Date: 2025-10-07
   - writes merged `train_manifest.jsonl`, `val_manifest.jsonl`, `manifest_summary.json`, and `runpod_training_commands.txt`.
 - Added `docs/runpod_futo_telugu.md` with the coordinate clarification, failed frozen-encoder explanation, pod setup/configuration, data prep, smoke check, full first training command, and deployment guardrails.
 - Local smoke test for `prepare_runpod_training_data.py` passed with tiny fake FUTO train/dev/test files and a tiny fake Telugu dict. Output summary reported `coordinate_space: zero_one` and non-empty train/val manifests.
+
+2026-05-08 (Colab smoke training)
+
+- Patched `new/train_transducer_personalized.py` so Colab smoke runs can use `--limit-train-batches` directly.
+- Fixed `--subset-train` and `--subset-val` so they actually wrap datasets before sampling weights are computed.
+- Validation now honors `--num-workers 0` instead of forcing four validation workers, avoiding Colab sanity-check DataLoader stalls.
