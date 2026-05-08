@@ -106,5 +106,5 @@ Date: 2025-10-07
   - uses the committed `data/dakshina/te_dict.json` by default, or optionally builds a Dakshina `{lang}_dict.json` from a separate sibling dataset folder;
   - generates Telugu synthetic train/val JSONL in `[0,1]`;
   - writes merged `train_manifest.jsonl`, `val_manifest.jsonl`, `manifest_summary.json`, and `runpod_training_commands.txt`.
-- Added `docs/runpod_futo_telugu.md` with the coordinate clarification, failed frozen-encoder explanation, pod setup, data prep, smoke check, full first training command, and deployment guardrails.
+- Added `docs/runpod_futo_telugu.md` with the coordinate clarification, failed frozen-encoder explanation, pod setup/configuration, data prep, smoke check, full first training command, and deployment guardrails.
 - Local smoke test for `prepare_runpod_training_data.py` passed with tiny fake FUTO train/dev/test files and a tiny fake Telugu dict. Output summary reported `coordinate_space: zero_one` and non-empty train/val manifests.

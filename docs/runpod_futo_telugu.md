@@ -78,10 +78,55 @@ No --normalize for voice-typing training.
 
 ## Pod Setup
 
+Recommended RunPod configuration for the first real training run:
+
+```text
+GPU:              1x RTX 4090 24GB minimum
+Preferred GPU:    1x RTX 6000 Ada / L40S / A6000 48GB if available
+Avoid:            16GB cards for the full run unless batch size is reduced
+vCPU:             8 minimum, 16 preferred
+RAM:              64 GB minimum, 128 GB preferred
+Container disk:   80-120 GB
+Persistent volume: 150-250 GB
+GPU count:        1
+Network volume:   Optional, useful if reusing FUTO/checkpoints across pods
+Cloud type:       Community is fine for cost; Secure Cloud if policy requires it
+Ports:            No public port required for training; expose 6006 only if using TensorBoard
+```
+
+Container image/template:
+
+```text
+Use a RunPod PyTorch template with CUDA 12.4+ and Python 3.12 if available.
+PyTorch 2.8 / CUDA 12.8 / Python 3.12 is ideal.
+```
+
+If the chosen template does not already include `uv`, install it in the pod:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.local/bin/env
+uv --version
+```
+
+If you have to use a 24GB GPU, start with the generated command's default `--batch-size 256`. If CUDA OOM happens, retry with:
+
+```text
+--batch-size 128
+```
+
+If it still OOMs, use:
+
+```text
+--batch-size 64
+```
+
+For a 48GB GPU, `--batch-size 256` should be the first attempt.
+
 On RunPod:
 
 ```bash
-git clone <your-cleverkeys-ml-repo-url> CleverKeys-ML
+git clone https://github.com/nagesh-meesani/CleverKeys-ML.git
 cd CleverKeys-ML
 git checkout feat/futo-te-training
 uv sync
