@@ -1133,22 +1133,17 @@ class PersonalizedRNNTModel(nemo_asr.models.EncDecRNNTModel):
             print(f"Could not log batch errors: {e}")
 
     def validation_step(self, *args, **kwargs):
-        # Validation forward can be autocast BF16 when enabled
-        amp_ctx = (
-            torch.cuda.amp.autocast(dtype=torch.bfloat16)
-            if self.use_autocast_bf16
-            else nullcontext()
-        )
-        with amp_ctx:
+        # Force fp32 during validation. NeMo's RNNT WER metric / label-looping
+        # decoder allocates score buffers as Float32 and crashes with
+        #   RuntimeError: Expected out type to be Float but got BFloat16
+        # when fed bf16 joint outputs (either from Lightning bf16-mixed or our
+        # own autocast wrapper). Validation is a tiny fraction of total compute,
+        # so the fp32 cost is negligible and removes the dtype hazard entirely.
+        with torch.autocast(device_type="cuda", enabled=False):
             return super().validation_step(*args, **kwargs)
 
     def test_step(self, *args, **kwargs):
-        amp_ctx = (
-            torch.cuda.amp.autocast(dtype=torch.bfloat16)
-            if self.use_autocast_bf16
-            else nullcontext()
-        )
-        with amp_ctx:
+        with torch.autocast(device_type="cuda", enabled=False):
             return super().test_step(*args, **kwargs)
 
 
