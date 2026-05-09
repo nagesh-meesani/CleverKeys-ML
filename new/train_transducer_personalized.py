@@ -1316,7 +1316,11 @@ def build_dataloaders(
         pin_memory=pin_memory,
         drop_last=True,
         persistent_workers=bool(cfg.training.persistent_workers and cfg.training.num_workers > 0),
-        prefetch_factor=(4 if cfg.training.num_workers > 0 else None),
+        # prefetch_factor=2 halves per-worker resident batches vs the previous 4.
+        # With 4-8 workers and batch_size 256 each prefetched batch holds tensors
+        # for hundreds of variable-length traces, so 4*workers buffered batches
+        # is the dominant RAM consumer and was OOM-killing RunPod containers.
+        prefetch_factor=(2 if cfg.training.num_workers > 0 else None),
     )
 
     val_sampler = None
@@ -1345,7 +1349,7 @@ def build_dataloaders(
         pin_memory=pin_memory,
         drop_last=False,  # drop_last=False is important for validation
         persistent_workers=bool(cfg.training.persistent_workers and val_workers > 0),
-        prefetch_factor=(4 if val_workers > 0 else None),
+        prefetch_factor=(2 if val_workers > 0 else None),
     )
     return train_loader, val_loader, featurizer.feature_dim
 
