@@ -1431,7 +1431,15 @@ def build_model_config(
                 "strategy": "greedy_batch",
                 "use_cuda_graphs": False,
                 "greedy": {"max_symbols": 13, "use_cuda_graph_decoder": False},
-                "greedy_batch": {"max_symbols": 13, "enable_cuda_graphs": False},
+                "greedy_batch": {
+                    "max_symbols": 13,
+                    "enable_cuda_graphs": False,
+                    # loop_labels=True path (RNNTLabelLoopingComputer) preallocates Float32
+                    # score buffers and crashes under bf16-mixed with:
+                    #   "Expected out type to be Float but got BFloat16"
+                    # Use the legacy frame-looping decoder which honors the joint dtype.
+                    "loop_labels": False,
+                },
             },
             "loss": {"_target_": "nemo.collections.asr.losses.rnnt_loss.RNNTLoss"},
             "optim": {
