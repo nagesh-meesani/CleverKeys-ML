@@ -129,3 +129,5 @@ Date: 2025-10-07
 - Reduced the trainer default DataLoader workers to 2 for the full-manifest path; use CLI `--num-workers` to tune upward only if RAM remains healthy.
 - Added `--gradient-accumulation` CLI override and a one-time `[train-shape]` log from `training_step` to prove tensors/devices/shapes reaching the CUDA RNNT path.
 - Fixed `QuickValStats` to report per-sample averages instead of per-batch sums mislabeled as averages.
+- Fixed a BF16 performance bug: wrapping training/validation in `torch.cuda.amp.autocast(enabled=False)` disabled Lightning's outer `bf16-mixed` autocast, forcing the joint tensor to float32. The trainer now uses `nullcontext()` unless manual autocast is explicitly enabled.
+- Disabled expensive validation prediction/error decode logging by default and stopped shuffling validation when no sampler is present.

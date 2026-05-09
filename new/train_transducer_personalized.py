@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import logging
 from functools import lru_cache
+from contextlib import nullcontext
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -264,7 +265,8 @@ CONFIG: Dict[str, Any] = {
         "check_val_every_n_epoch": 1,
         # "check_interval": 1,  # Run validation 4x per epoch (lighter each time).
         "max_samples": 1500,  # Limit the number of validation samples used.
-        "log_error_batches": 2,  # Print mispredictions from the first 3 validation batches for qualitative analysis.
+        "log_error_batches": 0,  # Keep validation cheap during large full-manifest runs.
+        "sample_prediction_batches": 0,  # Extra decode logging is expensive; enable only for qualitative checks.
     },
     # --- Data Augmentation ---
     # Creates more diverse training data to make the model more robust to real-world gesture variations.
@@ -1021,8 +1023,10 @@ class PersonalizedRNNTModel(nemo_asr.models.EncDecRNNTModel):
     def training_step(self, batch, batch_idx):
         signal, signal_len, transcript, transcript_len = batch
         # Autocast forward path for speed on BF16-capable GPUs when enabled
-        amp_ctx = torch.cuda.amp.autocast(
-            enabled=self.use_autocast_bf16, dtype=torch.bfloat16
+        amp_ctx = (
+            torch.cuda.amp.autocast(dtype=torch.bfloat16)
+            if self.use_autocast_bf16
+            else nullcontext()
         )
         with amp_ctx:
             encoded, encoded_len = self.forward(
@@ -1058,8 +1062,10 @@ class PersonalizedRNNTModel(nemo_asr.models.EncDecRNNTModel):
         if self.teacher is not None and self.kd_lambda > 0:
             with torch.no_grad():
                 # Teacher forward can also benefit from autocast
-                t_amp_ctx = torch.cuda.amp.autocast(
-                    enabled=self.use_autocast_bf16, dtype=torch.bfloat16
+                t_amp_ctx = (
+                    torch.cuda.amp.autocast(dtype=torch.bfloat16)
+                    if self.use_autocast_bf16
+                    else nullcontext()
                 )
                 with t_amp_ctx:
                     teacher_joint = self._compute_joint(
@@ -1128,15 +1134,21 @@ class PersonalizedRNNTModel(nemo_asr.models.EncDecRNNTModel):
 
     def validation_step(self, *args, **kwargs):
         # Validation forward can be autocast BF16 when enabled
-        with torch.cuda.amp.autocast(
-            enabled=self.use_autocast_bf16, dtype=torch.bfloat16
-        ):
+        amp_ctx = (
+            torch.cuda.amp.autocast(dtype=torch.bfloat16)
+            if self.use_autocast_bf16
+            else nullcontext()
+        )
+        with amp_ctx:
             return super().validation_step(*args, **kwargs)
 
     def test_step(self, *args, **kwargs):
-        with torch.cuda.amp.autocast(
-            enabled=self.use_autocast_bf16, dtype=torch.bfloat16
-        ):
+        amp_ctx = (
+            torch.cuda.amp.autocast(dtype=torch.bfloat16)
+            if self.use_autocast_bf16
+            else nullcontext()
+        )
+        with amp_ctx:
             return super().test_step(*args, **kwargs)
 
 
@@ -1332,7 +1344,7 @@ def build_dataloaders(
         dataset=val_ds,
         batch_size=val_batch_size,
         sampler=val_sampler,
-        shuffle=val_sampler is None,
+        shuffle=False,
         num_workers=val_workers,
         collate_fn=collate_fn,
         pin_memory=pin_memory,
@@ -1627,14 +1639,16 @@ def build_callbacks(
 
     callbacks: List[pl.Callback] = [
         checkpoint_callback,
-        ValidationErrorLogger(
-            max_batches=int(cfg.validation.get("log_error_batches", 1))
-        ),
         PeriodicNeMoSaver(save_interval=50, save_dir=root_dir),
         SamplePredictionsLogger(
-            train_manifest=cfg.data.train_manifest, val_limit=2, train_sample=15
+            train_manifest=cfg.data.train_manifest,
+            val_limit=int(cfg.validation.get("sample_prediction_batches", 0)),
+            train_sample=15,
         ),
     ]
+    log_error_batches = int(cfg.validation.get("log_error_batches", 0))
+    if log_error_batches > 0:
+        callbacks.append(ValidationErrorLogger(max_batches=log_error_batches))
 
     class ValWERBanner(pl.Callback):
         def __init__(self):
