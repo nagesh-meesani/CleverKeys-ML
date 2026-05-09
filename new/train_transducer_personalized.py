@@ -1430,15 +1430,25 @@ def build_model_config(
             "decoding": {
                 "strategy": "greedy_batch",
                 "use_cuda_graphs": False,
-                "greedy": {"max_symbols": 13, "use_cuda_graph_decoder": False},
+                # NeMo's RNNTDecoding reads loop_labels / use_cuda_graph_decoder from the
+                # `greedy` sub-config for BOTH `greedy` and `greedy_batch` strategies
+                # (see nemo/.../rnnt_decoding.py around `case ... GREEDY_BATCH, RNNT`,
+                # which calls `self.cfg.greedy.get('loop_labels', True)`).
+                # The new label-looping path (loop_labels=True) preallocates Float32
+                # score buffers and crashes during validation under bf16-mixed with
+                #   "RuntimeError: Expected out type to be Float but got BFloat16"
+                # in rnnt_utils.add_results_masked_no_checks_. Force the legacy
+                # frame-looping decoder which honors the joint output dtype.
+                "greedy": {
+                    "max_symbols": 13,
+                    "loop_labels": False,
+                    "use_cuda_graph_decoder": False,
+                },
                 "greedy_batch": {
                     "max_symbols": 13,
                     "enable_cuda_graphs": False,
-                    # loop_labels=True path (RNNTLabelLoopingComputer) preallocates Float32
-                    # score buffers and crashes under bf16-mixed with:
-                    #   "Expected out type to be Float but got BFloat16"
-                    # Use the legacy frame-looping decoder which honors the joint dtype.
                     "loop_labels": False,
+                    "use_cuda_graph_decoder": False,
                 },
             },
             "loss": {"_target_": "nemo.collections.asr.losses.rnnt_loss.RNNTLoss"},
