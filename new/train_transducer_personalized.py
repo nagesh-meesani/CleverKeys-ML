@@ -200,8 +200,8 @@ CONFIG: Dict[str, Any] = {
     # --- Training Hyperparameters ---
     "training": {
         "batch_size": 384,  # Safer default for 16GB GPUs and RNNT
-        "num_workers": 0,  # Safer default; can be overridden via CLI
-        "persistent_workers": False,  # Whether to use persistent workers.
+        "num_workers": 8,  # Parallel CPU featurization to keep the GPU fed; override via CLI.
+        "persistent_workers": True,  # Keep workers alive across epochs to avoid manifest re-load cost.
         "learning_rate": 2e-4,  # A conservative learning rate for the AdamW optimizer, good for stable convergence.
         "max_epochs": 500,  # Total number of training epochs (increased for multi-day training).
         "limit_train_batches": 1.0,  # Fraction/number of train batches per epoch; 1.0 means full epoch.
@@ -1296,8 +1296,8 @@ def build_dataloaders(
         collate_fn=collate_fn,
         pin_memory=pin_memory,
         drop_last=True,
-        persistent_workers=cfg.training.persistent_workers,
-        prefetch_factor=(2 if cfg.training.num_workers > 0 else None),
+        persistent_workers=bool(cfg.training.persistent_workers and cfg.training.num_workers > 0),
+        prefetch_factor=(4 if cfg.training.num_workers > 0 else None),
     )
 
     val_sampler = None
@@ -1325,8 +1325,8 @@ def build_dataloaders(
         collate_fn=collate_fn,
         pin_memory=pin_memory,
         drop_last=False,  # drop_last=False is important for validation
-        persistent_workers=cfg.training.persistent_workers,
-        prefetch_factor=2 if val_workers > 0 else None,
+        persistent_workers=bool(cfg.training.persistent_workers and val_workers > 0),
+        prefetch_factor=(4 if val_workers > 0 else None),
     )
     return train_loader, val_loader, featurizer.feature_dim
 
