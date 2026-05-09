@@ -200,8 +200,8 @@ CONFIG: Dict[str, Any] = {
     # --- Training Hyperparameters ---
     "training": {
         "batch_size": 384,  # Safer default for 16GB GPUs and RNNT
-        "num_workers": 8,  # Parallel CPU featurization to keep the GPU fed; override via CLI.
-        "persistent_workers": True,  # Keep workers alive across epochs to avoid manifest re-load cost.
+        "num_workers": 2,  # Keep worker RAM bounded for full 893k manifests; override via CLI.
+        "persistent_workers": True,  # Keep workers alive across epochs to avoid respawn cost.
         "learning_rate": 2e-4,  # A conservative learning rate for the AdamW optimizer, good for stable convergence.
         "max_epochs": 500,  # Total number of training epochs (increased for multi-day training).
         "limit_train_batches": 1.0,  # Fraction/number of train batches per epoch; 1.0 means full epoch.
@@ -928,6 +928,7 @@ class PersonalizedRNNTModel(nemo_asr.models.EncDecRNNTModel):
         self.kd_temperature = kd_temperature
         self.teacher = None
         self.use_autocast_bf16 = bool(use_autocast_bf16 and _supports_bf16())
+        self._logged_cuda_batch_shape = False
         if teacher_checkpoint:
             p = Path(teacher_checkpoint)
             if p.exists():
@@ -1031,6 +1032,17 @@ class PersonalizedRNNTModel(nemo_asr.models.EncDecRNNTModel):
                 targets=transcript, target_length=transcript_len
             )
             joint = self.joint(encoder_outputs=encoded, decoder_outputs=decoder)
+        if not self._logged_cuda_batch_shape and getattr(self.trainer, "is_global_zero", True):
+            print(
+                "[train-shape] "
+                f"signal={tuple(signal.shape)} signal_device={signal.device} "
+                f"encoded={tuple(encoded.shape)} encoded_device={encoded.device} "
+                f"decoder={tuple(decoder.shape)} joint={tuple(joint.shape)} "
+                f"joint_dtype={joint.dtype} targets={tuple(transcript.shape)} "
+                f"max_T={int(encoded_len.max().item())} max_U={int(target_length.max().item())}",
+                flush=True,
+            )
+            self._logged_cuda_batch_shape = True
 
         # --- Standard RNN-T Loss ---
         loss_value = self.loss(
@@ -1807,6 +1819,12 @@ def main() -> None:
         "--num-workers", type=int, default=None, help="Override DataLoader worker count"
     )
     parser.add_argument(
+        "--gradient-accumulation",
+        type=int,
+        default=None,
+        help="Override Lightning accumulate_grad_batches. Use 1 for faster wall-clock iteration on a single 4090.",
+    )
+    parser.add_argument(
         "--learning-rate",
         type=float,
         default=None,
@@ -1889,6 +1907,8 @@ def main() -> None:
         cfg.training.batch_size = int(args.batch_size)
     if args.num_workers is not None and args.num_workers >= 0:
         cfg.training.num_workers = int(args.num_workers)
+    if args.gradient_accumulation is not None and args.gradient_accumulation > 0:
+        cfg.training.gradient_accumulation = int(args.gradient_accumulation)
     if args.learning_rate is not None and args.learning_rate > 0:
         cfg.training.learning_rate = float(args.learning_rate)
     if args.max_epochs is not None and args.max_epochs > 0:
@@ -2021,6 +2041,7 @@ def main() -> None:
         def on_validation_epoch_start(self, trainer, pl_module):
             self._sum_T = 0
             self._sum_tokens = 0
+            self._sum_samples = 0
             self._batches = 0
 
         def on_validation_batch_end(
@@ -2030,6 +2051,7 @@ def main() -> None:
                 signal, signal_len, transcript, transcript_len = batch
                 self._sum_T += int(signal_len.sum().item())
                 self._sum_tokens += int(transcript_len.sum().item())
+                self._sum_samples += int(signal_len.numel())
                 self._batches += 1
             except Exception:
                 pass
@@ -2039,10 +2061,14 @@ def main() -> None:
                 metrics = trainer.callback_metrics
                 val_wer = metrics.get("val_wer", None)
                 val_loss = metrics.get("val_loss", None)
-                avg_T = (self._sum_T / max(self._batches, 1)) if self._batches else None
+                avg_T = (
+                    (self._sum_T / max(self._sum_samples, 1))
+                    if self._sum_samples
+                    else None
+                )
                 avg_tokens = (
-                    (self._sum_tokens / max(self._batches, 1))
-                    if self._batches
+                    (self._sum_tokens / max(self._sum_samples, 1))
+                    if self._sum_samples
                     else None
                 )
                 msg = "[val]"
@@ -2051,9 +2077,9 @@ def main() -> None:
                 if val_loss is not None:
                     msg += f" loss={float(val_loss):.4f}"
                 if avg_T is not None:
-                    msg += f" avg_T={avg_T:.1f}"
+                    msg += f" avg_T_per_sample={avg_T:.1f}"
                 if avg_tokens is not None:
-                    msg += f" avg_tokens={avg_tokens:.1f}"
+                    msg += f" avg_tokens_per_sample={avg_tokens:.1f}"
                 print(msg)
             except Exception:
                 pass

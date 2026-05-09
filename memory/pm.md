@@ -122,3 +122,10 @@ Date: 2025-10-07
 - RunPod full FUTO+Telugu manifests can spend 10-15 minutes in CPU-side startup before CUDA appears in `nvidia-smi`, because `PersonalizedSwipeDataset` eagerly loads the full 4GB train JSONL and then computes sampling weights over all samples before Trainer starts.
 - Fixed `_has_usable_cuda()` to use CUDA availability instead of `torch.cuda.is_initialized()`, so DataLoaders can enable `pin_memory` before the first CUDA context is created.
 - Added manifest-load and sampling-weight progress logs to `new/train_transducer_personalized.py` so future full runs show progress during the pre-GPU phase.
+
+2026-05-09 (RunPod GPU utilization follow-up)
+
+- A 4090 pod with 41GB RAM hit ~95% system memory when using `--num-workers 8` with the full 893k manifest. The huge eager Python sample list plus worker processes can cause RAM pressure and make training slower despite CUDA being active.
+- Reduced the trainer default DataLoader workers to 2 for the full-manifest path; use CLI `--num-workers` to tune upward only if RAM remains healthy.
+- Added `--gradient-accumulation` CLI override and a one-time `[train-shape]` log from `training_step` to prove tensors/devices/shapes reaching the CUDA RNNT path.
+- Fixed `QuickValStats` to report per-sample averages instead of per-batch sums mislabeled as averages.
